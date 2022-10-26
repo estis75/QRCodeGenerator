@@ -1,0 +1,38 @@
+@require: stdjabook
+@require: table
+@import: QRCodeGenerator
+
+let-block ctx +centering it =
+  line-break true true ctx (inline-fil ++ read-inline ctx it ++ inline-fil)
+in
+document (|
+  title = {QRCode Generator v0.1};
+  author = {estis (\@estis_jc)};
+  show-title = true;
+  show-toc = false;
+|) '<
+  +centering {
+    \generate-qrcode (`estis`);
+  }
+  +p{
+    ようやく動く実装が終わったので公開です．
+    使い方は 
+  }
+  +code(`@import: QRCodeGenerator`);
+  +p{
+    で読み込んでもらった後，
+  }
+  +code(`QRCodeGenerator.generate-qrcode: point -> string -> graphics list`);
+  +p{
+    で埋め込んでもらうか， 上のように 
+  }
+  +code(``\QRCodeGenerator.generate-qrcode (`hello`)``);
+  +p{
+    とすれば，インラインで使用できます．
+  }
+  +p{
+    現バージョンでは ascii で７文字しか出せないので使えたものではありませんが，
+    そのうちいくつかの QRコードをサポートする予定です．
+  }
+  
+>
