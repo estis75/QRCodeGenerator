@@ -1,0 +1,810 @@
+@require: list
+@require: color
+@require: gr
+@require: option
+
+
+module QRCodeGenerator : sig
+  val generate-qrcode: point -> string -> graphics list
+  direct \generate-qrcode: [string] inline-cmd
+end = struct
+  type dataMode =
+    | Mode8bit
+    | AlphabetAndNumber
+    | NotDefined
+
+  let is-even n = 
+    round(float (n) /. 2.) * 2 == n
+
+  let (gf2on8-num-to-pow, gf2on8-pow-to-num) =
+    let ppoly = [false; false; false; false; false; false; false; false; true] in
+    let gen-polynomial = [true; false; false; false; true; true; true; false; true] in
+    let dividor n =
+      let is-dividable = match n |> List.nth 0 with 
+        | Some(nc) -> nc
+        | None -> abort-with-message `invalid dividor`
+      in 
+      if is-dividable then (
+        n |> List.mapi (fun j c -> (
+          if 0 <= j && j < 9 then 
+            match gen-polynomial |> List.nth j with 
+            | Some(gc) -> (c && not gc) || (not c && gc)
+            | None -> abort-with-message `implementation missing?`
+          else
+            c
+        ))
+      ) else n 
+    in
+    let left-sift l = 
+      let org = [false; false; false; false; false; false; false; false; false; ] in
+      org |> List.mapi (fun i _ -> (
+        if 0 <= i && i < 8 then (
+          match l |> List.nth i with 
+          | Some(gc) -> gc
+          | None -> abort-with-message `implementation missing?`
+        ) else
+          false
+      ))
+    in
+    let calc-binary-to-8bit l = 
+      l |> List.fold-lefti (fun i lhs c  -> (if c then ((1 << (8-i)) + lhs) else lhs )) 0
+    in
+      
+    let-rec generator i l (n2p, p2n) = 
+      if i < 256 then (
+        let tmp = l in
+        let num = calc-binary-to-8bit tmp in
+        let l = tmp |> List.mapi (fun j c -> (j, c)) |> List.filter (fun (j, _) -> j > 0) |> List.map (fun (j, c) -> c) in
+        let n2p = n2p |> List.mapi (fun j c -> (if j == num then i else c)) in
+        let p2n = p2n |> List.mapi (fun j c -> (if j == i then num else c)) in
+        let ls = left-sift l in
+        let l = dividor ls in % 9bit
+        generator (i + 1) l (n2p, p2n)
+      ) else
+        (n2p, p2n)
+      in
+    let-rec gen-list i = 
+      if i > 0 then
+        List.append [0] (gen-list (i - 1))
+      else 
+        []
+    in
+    let nulllist = gen-list 256 in
+    let (n2p, p2n) = generator 0 ppoly (nulllist, nulllist) in
+    % let () = p2n |> List.fold-left (fun lhs c -> display-message (arabic c)) () in
+      (n2p, p2n)
+
+  let modulo c m = 
+    if c < 0 then (
+      if c >= -m then 
+        c + m
+      else if c == (c / m) * m then
+        0
+      else 
+        c - (c / m) * m + m
+    ) else (
+      if c < m then 
+        c
+      else 
+        c - (c / m) * m
+    )
+
+  let format-information-to-list error-collection-rate mask-pattern = 
+    [
+      (band error-collection-rate 2) > 0;  (band error-collection-rate 1) > 0;
+      (band mask-pattern 4) > 0; (band mask-pattern 2) > 0; (band mask-pattern 1) > 0;
+    ]
+
+  let bch-15-5-encoding n = %: bool list (2 + 3 bit) -> bool list
+    % https://www.swetake.com/qrcode/qr6.html
+    let ntmp = List.append n [false; false; false; false; false; false; false; false; false; false] in % 5 bit -> 15 bit
+    let g = [true; false; true; false; false; true; true; false; true; true; true] in % G(x) : generator 
+    let-rec dividor i n =
+      let is-dividable = match n |> List.nth i with 
+        | Some(nc) -> nc
+        | None -> abort-with-message `invalid dividor`
+      in 
+      % let () = display-message (arabic i ^ #` is valid :` ^ (if is-dividable then `true` else `false`) ) in
+      if i < 5 then (
+        (
+          if is-dividable then (
+            n |> List.mapi (fun j c -> (
+              if i <= j && j < i + 11 then 
+                match g |> List.nth (j - i) with 
+                | Some(gc) -> (c && not gc) || (not c && gc)
+                | None -> abort-with-message `implementation missing?`
+              else
+                c
+            ))
+          ) else n 
+        ) |> dividor (i + 1)
+      )
+      else 
+        n
+    in
+    let xormask = [true; false; true; false; true; false; false; false; false; false; true; false; false; true; false] in
+    let rem = dividor 0 ntmp in
+    let rem = rem |> List.mapi (fun i c -> (i, c)) |> List.filter (fun (i,c) -> 5 <= i) |> List.map (fun (i,c) -> c) in
+    rem |> List.append n
+    |> List.mapi (fun i c -> (
+      match List.nth i xormask with 
+      | Some(x) -> (c && not x) || (not c && x)
+      | None -> abort-with-message `something wrong`
+    ))
+
+  let convert-hex-to-oct-char t = 
+    if t < 10 then 
+      arabic t
+    else if t == 10 then
+      `a`
+    else if t == 11 then
+      `b`
+    else if t == 12 then
+      `c`
+    else if t == 13 then
+      `d`
+    else if t == 14 then
+      `e`
+    else if t == 15 then
+      `f`
+    else 
+      abort-with-message (`invalid num `# ^ arabic t)
+
+  let generate-qrcode (x,y) url =
+    let size = 100pt in
+
+    %
+    % model:
+    %   model1:
+    %     versions: 1 - 14
+    %   model2:
+    %     versions: 1 - 40
+    %   microQR:
+    %     versions: ?
+    %
+    % error colloction rate: 0 - 3 
+    % mask-pattern: 0 - 7
+    let model = `2` in 
+    let version = 1 in
+    let error-collection-rate = 2 in % H
+    let mask-pattern = 3 in
+
+    % https://www.swetake.com/qrcode/qr_table0.html
+    let datamode = Mode8bit in
+    let num-datacode = 9 in
+    let data-length = 7 in
+    let num-error-collection = 17 in 
+
+    let quiet-zone = 4 in 
+    let main-zone = 21 in
+    let num-lines = quiet-zone + main-zone + quiet-zone in
+    let finder-pattern-size = 1 + 1 + 3 + 1 + 1 in
+    let max-data-size = 
+      main-zone * main-zone 
+        - (finder-pattern-size + 1) * (finder-pattern-size + 1) * 3
+        - 15 * 2 % format information
+        - ((main-zone - (finder-pattern-size * 2 + 1 * 2)) * 2 + 1)  % timing 
+    in
+
+    let-mutable qrcode <- 
+      let-rec one-line num-lines =
+        if num-lines > 0 then
+          List.append (one-line (num-lines - 1)) [None]
+        else 
+          []
+      in 
+      let-rec n-lines num-lines one-line =
+        if num-lines > 0 then
+          List.append (n-lines (num-lines - 1) one-line) [one-line]
+        else 
+          []
+      in 
+      n-lines num-lines (one-line num-lines)
+    in 
+
+    let is-quiet-zone i j = 
+      (0 <= i && i < quiet-zone)
+       || (0 <= j && j < quiet-zone)
+       || (num-lines - quiet-zone <= i && i < num-lines)
+       || (num-lines - quiet-zone <= j && j < num-lines)
+    in
+
+    let set-quiet-zone qrcode =
+      qrcode |> List.mapi ( fun i l ->
+        l |> List.mapi (fun j c -> (
+          if is-quiet-zone i j then Some(false) else c
+        ))
+      ) 
+    in
+
+    let st = Some(true) in
+    let sf = Some(false) in
+    let finder-pattern = [
+      [st; st; st; st; st; st; st; sf]; 
+      [st; sf; sf; sf; sf; sf; st; sf]; 
+      [st; sf; st; st; st; sf; st; sf]; 
+      [st; sf; st; st; st; sf; st; sf]; 
+      [st; sf; st; st; st; sf; st; sf]; 
+      [st; sf; sf; sf; sf; sf; st; sf]; 
+      [st; st; st; st; st; st; st; sf]; 
+      [sf; sf; sf; sf; sf; sf; sf; sf] 
+    ] in
+    let set-finder-pattern-top-left qrcode = 
+      let minx = quiet-zone in 
+      let miny = quiet-zone in 
+      let maxx = minx + finder-pattern-size in 
+      let maxy = miny + finder-pattern-size in 
+      let finder-pattern = finder-pattern in
+      qrcode |> List.mapi (fun i qrcode -> 
+        qrcode |> List.mapi (fun j qrcode -> (
+          if minx <= i && i <= maxx then ( % finer + while space
+            if miny <= j && j <= maxy then  % finer + while space
+              match finder-pattern |> List.nth (i - minx) with
+              | Some(l) -> (
+                  match l |> List.nth (j - miny) with
+                  | Some(j) -> j
+                  | None -> abort-with-message `invalid line number! (but why so?)`
+                )
+              | None -> abort-with-message `invalid line number! (but why so?)`
+            else 
+              qrcode
+          )
+          else
+            qrcode
+        ))
+      )
+    in
+    let set-finder-pattern-top-right qrcode = 
+      let minx = num-lines - finder-pattern-size - quiet-zone - 1 in 
+      let miny = quiet-zone in 
+      let maxx = minx + finder-pattern-size in 
+      let maxy = miny + finder-pattern-size in 
+      let finder-pattern = List.reverse finder-pattern in
+      qrcode |> List.mapi (fun i qrcode -> 
+        qrcode |> List.mapi (fun j qrcode -> (
+          if minx <= i && i <= maxx then ( % finer + while space
+            if miny <= j && j <= maxy then  % finer + while space
+              match finder-pattern |> List.nth (i - minx) with
+              | Some(l) -> (
+                  match l |> List.nth (j - miny) with
+                  | Some(j) -> j
+                  | None -> abort-with-message `invalid line number! (but why so?)`
+                )
+              | None -> abort-with-message `invalid line number! (but why so?)`
+            else 
+              qrcode
+          )
+          else
+            qrcode
+        ))
+      )
+    in
+
+    let set-finder-pattern-bottom-left qrcode = 
+      let minx = quiet-zone in 
+      let miny = num-lines - finder-pattern-size - quiet-zone - 1 in 
+      let maxx = minx + finder-pattern-size in 
+      let maxy = miny + finder-pattern-size in 
+      let finder-pattern = finder-pattern |> List.map (fun l -> List.reverse l) in
+      qrcode |> List.mapi (fun i qrcode -> 
+        qrcode |> List.mapi (fun j qrcode -> (
+          if minx <= i && i <= maxx then ( % finer + while space
+            if miny <= j && j <= maxy then  % finer + while space
+              match finder-pattern |> List.nth (i - minx) with
+              | Some(l) -> (
+                  match l |> List.nth (j - miny) with
+                  | Some(j) -> j
+                  | None -> abort-with-message `invalid line number! (but why so?)`
+                )
+              | None -> abort-with-message `invalid line number! (but why so?)`
+            else 
+              qrcode
+          )
+          else
+            qrcode
+        ))
+      )
+    in
+
+    let set-finder-patterns qrcode2d = 
+      % top left 
+      let qrcode2d = set-finder-pattern-top-left qrcode2d in
+      % top right
+      let qrcode2d = set-finder-pattern-top-right qrcode2d in
+      % bottom left 
+      let qrcode2d = set-finder-pattern-bottom-left qrcode2d in
+      qrcode2d
+    in
+
+    let set-timing-patten-holizontal qrcode2d =
+      let timing-pattern-line = quiet-zone + finder-pattern-size - 1 in
+      qrcode2d |> List.mapi (fun i l -> (
+        l |> List.mapi (fun j l -> (
+          if is-quiet-zone i j then
+            l
+          else if j == timing-pattern-line then 
+            if Option.is-none l then 
+              Some(is-even i)
+            else 
+              l
+          else l
+        ))
+      ))
+    in
+
+    let set-timing-patten-vertival qrcode2d =
+      let timing-pattern-line = quiet-zone + finder-pattern-size - 1 in
+      qrcode2d |> List.mapi (fun i l -> (
+        if i == timing-pattern-line then 
+          l |> List.mapi (fun j l -> (
+            if is-quiet-zone i j then
+              l
+            else if Option.is-none l then 
+              Some(is-even j)
+            else 
+              l
+          ))
+        else l
+      ))
+    in
+
+    let set-timing-patten-dot qrcode2d =
+      let timing-pattern-vline = quiet-zone + finder-pattern-size + 1 in
+      let timing-pattern-hline = quiet-zone + main-zone - finder-pattern-size - 1 in
+      qrcode2d |> List.mapi (fun i l -> (
+        if i == timing-pattern-vline then 
+          l |> List.mapi (fun j c -> (
+            if j == timing-pattern-hline then
+              Some(true)
+            else 
+              c
+          ))
+        else l
+      ))
+    in
+    let set-timing-patterns qrcode2d =
+      qrcode2d 
+        |> set-timing-patten-holizontal 
+        |> set-timing-patten-vertival
+        |> set-timing-patten-dot
+    in
+
+
+    let set-format-information-top-left qrcode2d = 
+      % FIXME: maybe somebug exists in calculating format-information
+      let format-information = format-information-to-list error-collection-rate mask-pattern |> bch-15-5-encoding in
+      let format-information = format-information |> List.reverse in
+      let-mutable count <- 0 in
+      let qrcode2d = qrcode2d |> List.mapi (fun i l -> (
+        if i == quiet-zone + finder-pattern-size + 1 then
+          l |> List.mapi (fun j c -> (
+            if quiet-zone <= j && Option.is-none c && !count < 7 then 
+              match format-information |> List.nth !count with
+              | Some(c) -> (
+                  let () = count <- !count + 1 in
+                  Some(c)
+                )
+              | None -> abort-with-message `something wrong`
+            else c
+          ))
+        else l
+      )) in
+      let qrcode2d = qrcode2d |> List.mapi (fun i l -> (
+        l |> List.mapi (fun j c -> (
+          if j == quiet-zone + finder-pattern-size + 1 then
+            if quiet-zone <= i && Option.is-none c && !count >= 0 then 
+              match format-information |> List.nth (7 + !count) with
+              | Some(c) -> (
+                  let () = count <- !count - 1 in
+                  Some(c)
+                )
+              | None -> abort-with-message `something wrong`
+            else c
+          else c
+        ))
+      )) in
+      qrcode2d 
+    in
+
+    let set-format-information-fragmented qrcode2d = 
+      % FIXME: maybe somebug exists in calculating format-information
+      let format-information = format-information-to-list error-collection-rate mask-pattern |> bch-15-5-encoding in
+      let format-information = format-information |> List.reverse in
+      let-mutable count <- 0 in
+      let qrcode2d = qrcode2d |> List.mapi (fun i l -> (
+        if i == quiet-zone + finder-pattern-size + 1 then
+          l |> List.mapi (fun j c -> (
+            if num-lines - quiet-zone - finder-pattern-size <= j && Option.is-none c && !count < 7 then 
+              match format-information |> List.nth (8 + !count) with
+              | Some(c) -> (
+                  let () = count <- !count + 1 in
+                  Some(c)
+                )
+              | None -> abort-with-message `something wrong`
+            else c
+          ))
+        else l
+      )) in
+      let qrcode2d = qrcode2d |> List.mapi (fun i l -> (
+        l |> List.mapi (fun j c -> (
+          if j == quiet-zone + finder-pattern-size + 1 then
+            if num-lines - quiet-zone - finder-pattern-size - 1 <= i && Option.is-none c && !count >= 0 then 
+              match format-information |> List.nth !count with
+              | Some(c) -> (
+                  let () = count <- !count - 1 in
+                  Some(c)
+                )
+              | None -> abort-with-message `something wrong`
+            else c
+          else c
+        ))
+      )) in
+      qrcode2d 
+    in
+
+    let set-format-information qrcode2d = 
+      let qrcode2d = set-format-information-top-left qrcode2d in
+      let qrcode2d = set-format-information-fragmented qrcode2d in
+      qrcode2d
+    in 
+
+    let is-needed-mask (x, y) =
+      if mask-pattern == 3 then (
+        modulo (x + y) 3 == 0
+      ) else (
+        abort-with-message (`this version does not support the mask pattern: `# ^ arabic mask-pattern)
+      )
+    in
+
+    let set-data with-mask flatten-data qrcode2d = % int list -> bool option list
+      let-mutable is-right <- true in
+      let-mutable is-to-top <- true in
+      let-mutable current-index <- (num-lines - quiet-zone - 1, num-lines - quiet-zone - 1) in
+      let-mutable qrcode2d <- qrcode2d in
+
+      let () = flatten-data |> List.map ( fun c -> (
+        let (x, y) = if !is-right then (
+          let (x, y) = !current-index in
+          if x == quiet-zone + finder-pattern-size - 1 then (
+            let () = current-index <- (x - 1, y) in
+            (x - 1, y)
+          ) else (
+            let lx = match !qrcode2d |> List.nth x with
+              | Some(l) -> l
+              | None    -> abort-with-message (`invalid line number x = `# ^ (arabic x) )
+            in
+            let-rec find-num tpy = 
+              % let () = display-message (`current index y = `# ^ arabic tpy) in
+              if tpy < 0 || tpy >= quiet-zone + main-zone then
+                None
+              else (
+                match lx |> List.nth tpy with
+                  | Some(Some(_)) -> find-num (if !is-to-top then (tpy - 1) else (tpy + 1) )
+                  | Some(None) -> Some(tpy)
+                  | None -> abort-with-message (`invalid index` ^ #` x = `# ^ (arabic x) ^ #` y = `# ^ (arabic tpy))
+              )
+            in
+            let tpindex = match find-num y with
+              | Some(c) -> (x, c)
+              | None -> abort-with-message (`invalid index` ^ #` x = `# ^ (arabic x) ^ #` y = `# ^ (arabic y)) 
+            in
+            let () = current-index <- tpindex in
+            tpindex
+          )
+        ) else (
+          !current-index
+        ) 
+        in 
+        % let () = display-message (#` x = `# ^ arabic x ^ #` : `#  ^ `y = `# ^ arabic y) in
+        let () = qrcode2d <- !qrcode2d |> List.mapi (fun i l -> (
+          l |> List.mapi (fun j mc -> (
+            if i == x && j == y then (
+              if Option.is-none mc then (
+                if with-mask && is-needed-mask (x - quiet-zone , y - quiet-zone) then
+                  Some(not c)
+                else
+                  Some(c)
+              ) else
+                abort-with-message (`the place has already been filled` ^ #` x = `# ^ arabic x ^ #` : `#  ^ `y = `# ^ arabic y) 
+            ) else mc
+          ))
+        )) in 
+        if !is-right then (
+          let () = current-index <- (
+            match !qrcode2d |> List.nth (x - 1) |> (Option.map (List.nth y)) with
+              | Some(Some(Some(c))) -> (
+                % let () = display-message (`00` ^ (if c then `true` else `false`)) in
+                (x, if !is-to-top then (y - 1) else (y + 1))
+              )
+              | _ -> (
+                % let () = display-message `01` in
+                (x - 1, y)
+              )
+          ) in
+          let () = is-right <- false in 
+          ()
+        ) else (
+          let () = current-index <- (
+            match !qrcode2d |> List.nth (x + 1) |> (Option.map (List.nth (if !is-to-top then (y - 1) else (y + 1)))) with
+              | Some(Some(Some(c))) -> (
+                  let lx = match !qrcode2d |> List.nth (x + 1) with
+                    | Some(l) -> l
+                    | None    -> abort-with-message (`invalid line number x = `# ^ (arabic x) )
+                  in
+                  let-rec find-num tpy = 
+                    % let () = display-message (`current index y = `# ^ arabic tpy) in
+                    if tpy < 0 || tpy >= quiet-zone + main-zone then
+                      None
+                    else (
+                      match lx |> List.nth tpy with
+                        | Some(Some(_)) -> find-num (if !is-to-top then (tpy - 1) else (tpy + 1) )
+                        | Some(None) -> Some(tpy)
+                        | None -> abort-with-message (`invalid index` ^ #` x = `# ^ (arabic x) ^ #` y = `# ^ (arabic tpy))
+                    )
+                  in
+                  match find-num y with
+                  | Some(c) -> (x + 1, c)
+                  | None -> (
+                    let () = is-to-top <- not !is-to-top in
+                    (x - 1, y) 
+                  )
+                ) 
+              | _ -> (x + 1, if !is-to-top then (y - 1) else (y + 1))
+          ) in
+          let () = is-right <- true in
+          ()
+        )
+      )) |> List.fold-left (fun _ _ -> ()) ()  in
+      !qrcode2d
+    in
+
+    let-rec list-to-graphics qrcode =
+      let qrcode = qrcode |> List.map ( fun l -> List.reverse l) in 
+      let qrlist1d = List.concat (
+        qrcode |> List.mapi (fun i qrcode2d -> 
+          qrcode2d |> List.mapi (fun j qrcode1d -> 
+            (i, j, qrcode1d)
+          ) 
+        ) 
+      )
+       in
+      qrlist1d |> List.map (
+        fun (i, j, q) -> (
+          let xmin = x +' size *' ((float i) /. (float num-lines)) in
+          let ymin = y +' size *' ((float j) /. (float num-lines)) in
+          let xmax = xmin +' size *' (1. /. (float num-lines)) in
+          let ymax = ymin +' size *' (1. /. (float num-lines)) in
+
+          (Gr.rectangle (xmin, ymin) (xmax, ymax)) |> (
+            match q with 
+            | None -> 
+              % TODO: set white (this is for debug)
+              if round(float (i + j) /. 2.) * 2 == i + j then
+                fill (Color.gray 0.4) 
+              else
+                fill (Color.gray 0.6)
+            | Some(q) ->
+              if q then
+                fill Color.black
+              else
+                fill Color.white
+          )
+        )
+      ) 
+    in
+
+    let append-error-collecting-code lst = %: 8bit list -> 8bit list
+      % https://www.swetake.com/qrcode/qr3.html
+      let ntmp = List.append 
+        lst 
+        [0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; ] 
+      in
+      let g = [1; 119; 66; 83; 120; 119; 22; 197; 83; 249; 41; 143; 134; 85; 53; 125; 99; 79; ] in 
+      let-rec dividor i n =
+        let is-dividable = match n |> List.nth i with 
+          | Some(nc) -> nc
+          | None -> abort-with-message `invalid dividor`
+        in 
+        let powl = match gf2on8-num-to-pow |> List.nth is-dividable with
+          | Some(c) -> c
+          | _ -> abort-with-message `gf2on8-num-to-pow: out of range` in
+        % let () = display-message (arabic i ^ #` is valid :` ^ (if is-dividable then `true` else `false`) ) in
+        if i < num-datacode then (
+          (
+            if is-dividable > 0 then (
+              n |> List.mapi (fun j c -> (
+                if i <= j && j < i + 18 then 
+                  match g |> List.nth (j - i) with 
+                  | Some(gc) ->  
+                    let powr = match gf2on8-num-to-pow |> List.nth gc with
+                      | Some(c) -> c
+                      | _ -> abort-with-message `gf2on8-num-to-pow: out of range` in
+                    let ans = match gf2on8-pow-to-num |> List.nth (modulo ( powl + powr ) 255) with
+                      | Some(c) -> c
+                      | _ -> abort-with-message `gf2on8-pow-to-num: out of range` in
+                    (bxor ans c)
+                  | None -> abort-with-message `implementation missing?`
+                else
+                  c
+              ))
+            ) else n 
+          ) |> dividor (i + 1)
+        )
+        else 
+          n
+      in
+      let rem = dividor 0 ntmp in
+      let rem = rem |> List.mapi (fun i c -> (i, c)) |> List.filter (fun (i,c) -> (if num-datacode <= i then true else if c == 0 then false else (abort-with-message (`invalid value of index `# ^(arabic i) ^ #` (` ^ (arabic c) ^ `) in function division`)))) |> List.map (fun (i,c) -> c) in
+      % let () = display-message `error collecting code` in
+      % let () = display-message (rem |> List.fold-left (fun lhs c -> lhs ^ #` `# ^ (convert-hex-to-oct-char (c >> 4) ) ^ (convert-hex-to-oct-char (band c 15) )) ` `) in
+      rem |> List.append lst
+    in
+
+    let convertAlphabetAndNumber c =
+      if 48 <= c && c < 58 then
+        c - 48
+      else if 65 <= c && c < 91 then 
+        c - 65 + 10
+      else if c == 32 then 
+        36
+      else if c == 36 then 
+        37
+      else if c == 37 then 
+        38
+      else if c == 42 then 
+        39
+      else if c == 43 then 
+        40
+      else if c == 45 then 
+        41
+      else if c == 46 then 
+        42
+      else if c == 47 then 
+        43
+      else if c == 58 then 
+        44
+      else 
+        abort-with-message (`invalid num `# ^ arabic c)
+    in
+
+    let url-to-encoded-data url = 
+      let urldata = string-explode url in 
+      let charactor-len = List.length urldata in
+      let datalst = 
+        match datamode with
+         | Mode8bit ->  [false; true; false; false]
+         | AlphabetAndNumber -> [false; false; true; false]
+         | _ ->  abort-with-message (`this mode is not implemented`)
+      in
+      let datalst = 
+        match datamode with
+         | Mode8bit ->  
+            List.append 
+              datalst 
+              ([charactor-len] |> List.map (fun c -> [(band c (1 << 7)) > 0; (band c (1 << 6)) > 0; (band c (1 << 5)) > 0; (band c (1 << 4)) > 0; (band c (1 << 3)) > 0; (band c (1 << 2)) > 0; (band c (1 << 1)) > 0; (band c (1 << 0)) > 0;]) |> List.concat )
+         | AlphabetAndNumber -> 
+            List.append 
+              datalst 
+              ([charactor-len] |> List.map (fun c -> [(band c (1 << 8)) > 0; (band c (1 << 7)) > 0; (band c (1 << 6)) > 0; (band c (1 << 5)) > 0; (band c (1 << 4)) > 0; (band c (1 << 3)) > 0; (band c (1 << 2)) > 0; (band c (1 << 1)) > 0; (band c (1 << 0)) > 0;]) |> List.concat )
+         | _ ->  abort-with-message (`this mode is not implemented`)
+      in
+      let datalst = 
+        match datamode with
+         | Mode8bit ->  
+            List.append
+              datalst 
+              (urldata |> List.map (fun c ->
+                [(band c (1 << 7)) > 0; (band c (1 << 6)) > 0; (band c (1 << 5)) > 0; (band c (1 << 4)) > 0; (band c (1 << 3)) > 0; (band c (1 << 2)) > 0; (band c (1 << 1)) > 0; (band c (1 << 0)) > 0;]
+              ) |> List.concat )
+         | AlphabetAndNumber ->  
+            let (tmp, _) = urldata |> (List.fold-lefti (fun i (lhsl, lhsv) c -> (
+                  if (band i 1) > 0 then 
+                    ((List.append lhsl [lhsv + (convertAlphabetAndNumber c)]), 0)
+                  else 
+                    (lhsl, 45 * (convertAlphabetAndNumber c))
+                )) ([], 0)) 
+              in
+            List.append
+              datalst 
+              (tmp |> List.map (fun c ->
+                  [(band c (1 << 10)) > 0; (band c (1 << 9)) > 0; (band c (1 << 8)) > 0; (band c (1 << 7)) > 0; (band c (1 << 6)) > 0; (band c (1 << 5)) > 0; (band c (1 << 4)) > 0; (band c (1 << 3)) > 0; (band c (1 << 2)) > 0; (band c (1 << 1)) > 0; (band c (1 << 0)) > 0;]
+                ) |> List.concat 
+              )
+         | _ ->  abort-with-message (`this mode is not implemented`)
+      in
+      let datalst = 
+        List.append
+          datalst 
+          [false; false; false; false]
+      in
+          
+      let datalstlen = List.length datalst in
+      if datalstlen > num-datacode * 8 then 
+        abort-with-message (`there are too many data `# ^ arabic charactor-len ^ #` > `# ^ arabic data-length)
+      else (
+        let-rec generate-white-data len = 
+          if len > 0 then
+            false :: generate-white-data (len - 1)
+          else 
+            []
+        in
+        let wdata = generate-white-data (modulo (8 - datalstlen) 8) in 
+        let datalst = List.append datalst wdata in
+        let datalstlen = List.length datalst in
+        let-rec adding-pattern rest-length state = 
+          if rest-length > 0 then (
+            if state then 
+              List.append [true; true; true; false; true; true; false; false] (adding-pattern (rest-length - 8) (not state))
+            else 
+              List.append [false; false; false; true; false; false; false; true] (adding-pattern (rest-length - 8) (not state))
+          ) else
+            []
+        in
+        % let () = display-message (`max size: `# ^ arabic max-data-size) in
+        % let () = display-message (`data len: `# ^ arabic (List.length datalst)) in
+
+        let d = List.append datalst (adding-pattern (num-datacode * 8 - datalstlen) true) in
+        let-rec data-to-oct d = 
+          (d |> List.fold-lefti (fun i lhs r -> (
+            if modulo i 8 == 0 then (
+              (if r then 1 else 0) :: lhs
+            ) else (
+              match lhs with 
+              | c :: ls -> ((c << 1) + (if r then 1 else 0)) :: ls
+              | _ -> abort-with-message (`invalid setting`)
+            )
+          )) [] )
+          |> List.reverse
+        in
+
+        let c = data-to-oct d in
+        let c = append-error-collecting-code c in
+        % let tmp = display-message (convert-hex-to-oct-char (band 5 15)) in
+        % let () = display-message `current data list` in
+        % let tmp = c |> List.map (fun t -> (
+        %   display-message ((convert-hex-to-oct-char (band (t >> 4) 15)) ^ (convert-hex-to-oct-char (band t 15)))
+        % ) )in
+        let flatten-data = 
+          c |> List.map (fun c ->
+            % [(band c (1 << 7)) > 0; (band c (1 << 6)) > 0; (band c (1 << 5)) > 0; (band c (1 << 4)) > 0; (band c (1 << 3)) > 0; (band c (1 << 2)) > 0; (band c (1 << 1)) > 0; (band c (1 << 0)) > 0;] |> List.reverse
+            [(band c (1 << 0)) > 0; (band c (1 << 1)) > 0; (band c (1 << 2)) > 0; (band c (1 << 3)) > 0; (band c (1 << 4)) > 0; (band c (1 << 5)) > 0; (band c (1 << 6)) > 0; (band c (1 << 7)) > 0;] |> List.reverse
+          ) |> List.concat % set from lowerbit ?
+        in
+        flatten-data
+      )
+    in
+
+    let () = qrcode <- set-quiet-zone !qrcode in
+    let () = qrcode <- set-finder-patterns !qrcode in
+    let () = qrcode <- set-timing-patterns !qrcode in
+    let () = qrcode <- set-format-information !qrcode in
+    let () = qrcode <- set-data true (url-to-encoded-data url) !qrcode in % [0, 1] list
+    % let-rec url2stringlist-fordebug lst =
+    %   match lst with 
+    %   | c :: next -> (arabic c) ^ #` `# ^ url2stringlist-fordebug next
+    %   | [] -> ` `
+    % in
+    % let () = display-message (url2stringlist-fordebug (string-explode url)) in
+
+    % let flatten-data = 
+    %   [32; 65; 205; 69; 41; 220; 46; 128; 236; 42; 159; 74; 221; 244; 169; 239; 150; 138; 70; 237; 85; 224; 96; 74; 219; 61] |> List.map (fun c ->
+    %     % [(band c (1 << 7)) > 0; (band c (1 << 6)) > 0; (band c (1 << 5)) > 0; (band c (1 << 4)) > 0; (band c (1 << 3)) > 0; (band c (1 << 2)) > 0; (band c (1 << 1)) > 0; (band c (1 << 0)) > 0;] |> List.reverse
+    %     [(band c (1 << 0)) > 0; (band c (1 << 1)) > 0; (band c (1 << 2)) > 0; (band c (1 << 3)) > 0; (band c (1 << 4)) > 0; (band c (1 << 5)) > 0; (band c (1 << 6)) > 0; (band c (1 << 7)) > 0;] |> List.reverse
+    %   ) |> List.concat % set from lowerbit ?
+    % in
+    % let () = qrcode <- set-data 
+    %   true 
+    %   flatten-data   
+    %   !qrcode 
+    % in
+
+    % model.1 / ver.1: 
+    if true 
+      then list-to-graphics !qrcode
+      else abort-with-message `hello` 
+  
+  let-inline ctx \generate-qrcode url = 
+    let size = 100pt in
+      inline-graphics size size 0pt (fun p -> generate-qrcode p url)
+    
+end
