@@ -6,7 +6,7 @@ let-block ctx +centering it =
   line-break true true ctx (inline-fil ++ read-inline ctx it ++ inline-fil)
 in
 document (|
-  title = {QRCode Generator v0.1};
+  title = {QRCode Generator v0.2};
   author = {estis (\@estis_jc)};
   show-title = true;
   show-toc = false;
