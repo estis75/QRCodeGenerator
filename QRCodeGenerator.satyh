@@ -1,3 +1,7 @@
+%
+% ref: https://www.swetake.com/qrcode/
+% ref: https://sites.google.com/site/kikineria/qrcode/qr-kb
+%
 @require: list
 @require: color
 @require: gr
