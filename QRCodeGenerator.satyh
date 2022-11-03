@@ -5,13 +5,103 @@
 
 
 module QRCodeGenerator : sig
-  val generate-qrcode: point -> string -> graphics list
-  direct \generate-qrcode: [string] inline-cmd
+  val generate-qrcode: point -> length -> string -> graphics list
+  direct \generate-qrcode: [length?; string] inline-cmd
 end = struct
+  let quiet-zone = 4 
+
   type dataMode =
     | Mode8bit
     | AlphabetAndNumber
-    | NotDefined
+    | Number
+    | DatamodeNotDefined
+
+
+  type versionInformation =
+    | Version1
+    | Version2
+    | Version3
+    | Version4
+    | Version5
+    | VersionNotDefined
+  
+  let get-alignment-lst version = 
+    match version with
+    | Version1 -> []
+    | Version2 -> [(19 - 3 + quiet-zone, 19 - 3 + quiet-zone)] 
+    | _ -> abort-with-message `this version is not implemented in set-alignment-patterns`
+
+
+  type errorCollectionMode =
+    | ECLevelL
+    | ECLevelM
+    | ECLevelQ
+    | ECLevelH
+    | ECLevelNotDefined
+  
+  let eclevel-to-int eclevel = 
+    match eclevel with
+    | ECLevelL -> 1
+    | ECLevelM -> 0
+    | ECLevelQ -> 3
+    | ECLevelH -> 2
+    | ECLevelNotDefined -> abort-with-message `ECLevel is not defined.`
+
+  let version-and-eclevel-to-datasize-ecsize-rsblocks version eclevel= 
+    match version with
+    | Version1 -> (
+      match eclevel with
+      | ECLevelL -> (19,  7,  1)
+      | ECLevelM -> (16,  10, 1)
+      | ECLevelQ -> (13,  13, 1)
+      | ECLevelH -> (9,   17, 1)
+      | ECLevelNotDefined -> abort-with-message `ECLevel is not defined.`
+      )
+    | Version2 -> (
+      match eclevel with
+      | ECLevelL -> (34,  10, 1)
+      | ECLevelM -> (28,  16, 1)
+      | ECLevelQ -> (22,  22, 1)
+      | ECLevelH -> (16,  28, 1)
+      | ECLevelNotDefined -> abort-with-message `ECLevel is not defined.`
+      )
+    | Version3 -> (
+      match eclevel with
+      | ECLevelL -> (55,  15, 1)
+      | ECLevelM -> (44,  26, 1)
+      | ECLevelQ -> (34,  36, 2)
+      | ECLevelH -> (26,  44, 2)
+      | ECLevelNotDefined -> abort-with-message `ECLevel is not defined.`
+      )
+    | Version4 -> (
+      match eclevel with
+      | ECLevelL -> (80,  20, 1)
+      | ECLevelM -> (64,  36, 2)
+      | ECLevelQ -> (48,  52, 2)
+      | ECLevelH -> (36,  64, 4)
+      | ECLevelNotDefined -> abort-with-message `ECLevel is not defined.`
+      )
+    | Version5 -> (
+      match eclevel with
+      | ECLevelL -> (108, 26, 1)
+      | ECLevelM -> (86,  48, 2)
+      | ECLevelQ -> (62,  72, 2)
+      | ECLevelH -> (46,  88, 2)
+      | ECLevelNotDefined -> abort-with-message `ECLevel is not defined.`
+      )
+    | VersionNotDefined ->  abort-with-message `Version information is not defined.`
+
+  let-rec gen-list i = 
+    if i > 0 then
+      List.append [0] (gen-list (i - 1))
+    else 
+      []
+
+  let-rec gen-bool-list i = 
+    if i > 0 then
+      List.append [false] (gen-bool-list (i - 1))
+    else 
+      []
 
   let is-even n = 
     round(float (n) /. 2.) * 2 == n
@@ -63,12 +153,6 @@ end = struct
       ) else
         (n2p, p2n)
       in
-    let-rec gen-list i = 
-      if i > 0 then
-        List.append [0] (gen-list (i - 1))
-      else 
-        []
-    in
     let nulllist = gen-list 256 in
     let (n2p, p2n) = generator 0 ppoly (nulllist, nulllist) in
     % let () = p2n |> List.fold-left (fun lhs c -> display-message (arabic c)) () in
@@ -150,9 +234,7 @@ end = struct
     else 
       abort-with-message (`invalid num `# ^ arabic t)
 
-  let generate-qrcode (x,y) url =
-    let size = 100pt in
-
+  let generate-qrcode (x,y) size url =
     %
     % model:
     %   model1:
@@ -164,19 +246,38 @@ end = struct
     %
     % error colloction rate: 0 - 3 
     % mask-pattern: 0 - 7
-    let model = `2` in 
-    let version = 1 in
-    let error-collection-rate = 2 in % H
-    let mask-pattern = 3 in
 
     % https://www.swetake.com/qrcode/qr_table0.html
     let datamode = Mode8bit in
-    let num-datacode = 9 in
-    let data-length = 7 in
-    let num-error-collection = 17 in 
+    let version = Version2 in
+    let eclevel = ECLevelL in % H
+    let model = `2` in 
+    let error-collection-rate = eclevel-to-int eclevel in
+    let mask-pattern = 3 in
 
-    let quiet-zone = 4 in 
-    let main-zone = 21 in
+    let (num-datacode, num-error-collection, num-rsblock) = 
+      version-and-eclevel-to-datasize-ecsize-rsblocks version eclevel 
+    in
+    let data-length = 
+      match datamode with
+      | Mode8bit          -> num-datacode - 2 
+      | AlphabetAndNumber -> (
+        let bits = (num-datacode - 2) * 8 in
+          (bits / 9) * 2 + (if (modulo bits 9) >= 6 then 1 else 0)
+        )
+      | Number -> (
+        let bits = (num-datacode - 2) * 8 in
+          (bits / 8) * 2 + (if (modulo bits 10) >= 7 then 2 else if (modulo bits 10) >= 4 then 1 else 0)
+        )
+      | DatamodeNotDefined -> abort-with-message `DataMode is not defined.`
+    in
+
+    let main-zone = 
+      match version with
+      | Version1 -> 21 
+      | Version2 -> 25 
+      | _ -> abort-with-message `this version is not implemented`
+    in
     let num-lines = quiet-zone + main-zone + quiet-zone in
     let finder-pattern-size = 1 + 1 + 3 + 1 + 1 in
     let max-data-size = 
@@ -184,6 +285,7 @@ end = struct
         - (finder-pattern-size + 1) * (finder-pattern-size + 1) * 3
         - 15 * 2 % format information
         - ((main-zone - (finder-pattern-size * 2 + 1 * 2)) * 2 + 1)  % timing 
+        - 25 * List.length (get-alignment-lst version)
     in
 
     let-mutable qrcode <- 
@@ -369,6 +471,36 @@ end = struct
         |> set-timing-patten-dot
     in
 
+    let set-alignment-pattern (x, y) qrcode2d =
+      let alignment-patterns = [
+        [true; true;  true;   true;   true; ];
+        [true; false; false;  false;  true; ];
+        [true; false; true;   false;  true; ];
+        [true; false; false;  false;  true; ];
+        [true; true;  true;    true;  true; ];
+      ] in
+
+      qrcode2d |> List.mapi (fun i l -> (
+        if x <= i && i < x + 5  then
+          l |> List.mapi (fun j c -> (
+            if y <= j && j < y + 5 then 
+              match c  with
+              | None -> (
+                  match Option.bind (alignment-patterns |> List.nth (i - x)) (List.nth (j - y)) with
+                  | Some(ls) -> Some(ls)
+                  | None -> abort-with-message (`invalid index in set-alignment-pattern`) 
+                )
+              | Some(_) -> abort-with-message (`the place has already been filled` ^ #` x = `# ^ arabic x ^ #` : `#  ^ `y = `# ^ arabic y) 
+            else c
+          ))
+        else l
+      ))
+    in
+
+    let set-alignment-patterns qrcode2d = 
+      List.fold-left (fun c e -> set-alignment-pattern e c) qrcode2d (get-alignment-lst version)
+    in
+
 
     let set-format-information-top-left qrcode2d = 
       % FIXME: maybe somebug exists in calculating format-information
@@ -495,7 +627,7 @@ end = struct
           !current-index
         ) 
         in 
-        % let () = display-message (#` x = `# ^ arabic x ^ #` : `#  ^ `y = `# ^ arabic y) in
+        let () = display-message (#` x = `# ^ arabic x ^ #` : `#  ^ `y = `# ^ arabic y) in
         let () = qrcode2d <- !qrcode2d |> List.mapi (fun i l -> (
           l |> List.mapi (fun j mc -> (
             if i == x && j == y then (
@@ -525,25 +657,42 @@ end = struct
           ()
         ) else (
           let () = current-index <- (
+            let () = is-right <- true in
             match !qrcode2d |> List.nth (x + 1) |> (Option.map (List.nth (if !is-to-top then (y - 1) else (y + 1)))) with
               | Some(Some(Some(c))) -> (
-                  let lx = match !qrcode2d |> List.nth (x + 1) with
+                  let lxr = match !qrcode2d |> List.nth (x + 1) with
+                    | Some(l) -> l
+                    | None    -> abort-with-message (`invalid line number x = `# ^ (arabic x) )
+                  in
+                  let lxl = match !qrcode2d |> List.nth x with
                     | Some(l) -> l
                     | None    -> abort-with-message (`invalid line number x = `# ^ (arabic x) )
                   in
                   let-rec find-num tpy = 
-                    % let () = display-message (`current index y = `# ^ arabic tpy) in
+                    let () = display-message (`current index y = `# ^ arabic tpy) in
                     if tpy < 0 || tpy >= quiet-zone + main-zone then
                       None
                     else (
-                      match lx |> List.nth tpy with
-                        | Some(Some(_)) -> find-num (if !is-to-top then (tpy - 1) else (tpy + 1) )
-                        | Some(None) -> Some(tpy)
+                      let r = match lxr |> List.nth tpy with
+                        | Some(v) -> v
                         | None -> abort-with-message (`invalid index` ^ #` x = `# ^ (arabic x) ^ #` y = `# ^ (arabic tpy))
+                      in
+                      let l = match lxl |> List.nth tpy with
+                        | Some(v) -> v
+                        | None -> abort-with-message (`invalid index` ^ #` x = `# ^ (arabic x) ^ #` y = `# ^ (arabic tpy))
+                      in
+                      match (r, l) with
+                      | (None, _) -> Some((x + 1, tpy))
+                      | (Some(_), None) -> (
+                          let () = is-right <- false in
+                          Some((x, tpy))
+                        )
+                      | (Some(_), Some(_)) -> find-num (if !is-to-top then (tpy - 1) else (tpy + 1) )
+
                     )
                   in
                   match find-num y with
-                  | Some(c) -> (x + 1, c)
+                  | Some(res) -> res
                   | None -> (
                     let () = is-to-top <- not !is-to-top in
                     (x - 1, y) 
@@ -551,7 +700,6 @@ end = struct
                 ) 
               | _ -> (x + 1, if !is-to-top then (y - 1) else (y + 1))
           ) in
-          let () = is-right <- true in
           ()
         )
       )) |> List.fold-left (fun _ _ -> ()) ()  in
@@ -595,11 +743,25 @@ end = struct
 
     let append-error-collecting-code lst = %: 8bit list -> 8bit list
       % https://www.swetake.com/qrcode/qr3.html
+      
       let ntmp = List.append 
         lst 
-        [0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; ] 
+        (gen-list num-error-collection) 
       in
-      let g = [1; 119; 66; 83; 120; 119; 22; 197; 83; 249; 41; 143; 134; 85; 53; 125; 99; 79; ] in 
+      let g = match num-error-collection with
+        | 7 ->  [0; 87; 229; 146; 149; 238; 102; 21;] 
+                  |> List.map (fun e -> (
+                    let c = Option.from (-1) (gf2on8-pow-to-num |> List.nth e) in
+                    if c == -1 then abort-with-message `invalid implementation` else c 
+                  ))
+        | 10 ->  [0; 251; 67; 46; 61; 118; 70; 64; 94; 32; 45; ] 
+                  |> List.map (fun e -> (
+                    let c = Option.from (-1) (gf2on8-pow-to-num |> List.nth e) in
+                    if c == -1 then abort-with-message `invalid implementation` else c 
+                  ))
+        | 15 -> [1; 119; 66; 83; 120; 119; 22; 197; 83; 249; 41; 143; 134; 85; 53; 125; 99; 79; ] 
+        | _ -> abort-with-message (`num-error-collection = `# ^ arabic num-error-collection ^ #` is not supported`)
+      in
       let-rec dividor i n =
         let is-dividable = match n |> List.nth i with 
           | Some(nc) -> nc
@@ -613,7 +775,7 @@ end = struct
           (
             if is-dividable > 0 then (
               n |> List.mapi (fun j c -> (
-                if i <= j && j < i + 18 then 
+                if i <= j && j < i + num-error-collection + 1 then 
                   match g |> List.nth (j - i) with 
                   | Some(gc) ->  
                     let powr = match gf2on8-num-to-pow |> List.nth gc with
@@ -640,6 +802,11 @@ end = struct
       rem |> List.append lst
     in
 
+    let append-rest-bits lst = % add rest bits (@left-bottom)
+      let len = max-data-size - (List.length lst) in
+      List.append lst (gen-bool-list len)
+    in
+
     let convertAlphabetAndNumber c =
       if 48 <= c && c < 58 then
         c - 48
@@ -663,6 +830,8 @@ end = struct
         43
       else if c == 58 then 
         44
+      else if 97 <= c && c < 123 then 
+        abort-with-message (`cannot use small letter in datamode "AlphabetAndNumber"`)
       else 
         abort-with-message (`invalid num `# ^ arabic c)
     in
@@ -720,7 +889,7 @@ end = struct
           
       let datalstlen = List.length datalst in
       if datalstlen > num-datacode * 8 then 
-        abort-with-message (`there are too many data `# ^ arabic charactor-len ^ #` > `# ^ arabic data-length)
+        abort-with-message (`there are too many data `# ^ arabic datalstlen ^ #` > `# ^ arabic (num-datacode * 8))
       else (
         let-rec generate-white-data len = 
           if len > 0 then
@@ -770,6 +939,7 @@ end = struct
             [(band c (1 << 0)) > 0; (band c (1 << 1)) > 0; (band c (1 << 2)) > 0; (band c (1 << 3)) > 0; (band c (1 << 4)) > 0; (band c (1 << 5)) > 0; (band c (1 << 6)) > 0; (band c (1 << 7)) > 0;] |> List.reverse
           ) |> List.concat % set from lowerbit ?
         in
+        let flatten-data = append-rest-bits flatten-data in 
         flatten-data
       )
     in
@@ -777,6 +947,7 @@ end = struct
     let () = qrcode <- set-quiet-zone !qrcode in
     let () = qrcode <- set-finder-patterns !qrcode in
     let () = qrcode <- set-timing-patterns !qrcode in
+    let () = qrcode <- set-alignment-patterns !qrcode in
     let () = qrcode <- set-format-information !qrcode in
     let () = qrcode <- set-data true (url-to-encoded-data url) !qrcode in % [0, 1] list
     % let-rec url2stringlist-fordebug lst =
@@ -803,8 +974,8 @@ end = struct
       then list-to-graphics !qrcode
       else abort-with-message `hello` 
   
-  let-inline ctx \generate-qrcode url = 
-    let size = 100pt in
-      inline-graphics size size 0pt (fun p -> generate-qrcode p url)
+  let-inline ctx \generate-qrcode ?:size url = 
+    let size = Option.from 100pt size in
+      inline-graphics size size 0pt (fun p -> generate-qrcode p size url)
     
 end

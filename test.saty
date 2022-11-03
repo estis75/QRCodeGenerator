@@ -12,26 +12,29 @@ document (|
   show-toc = false;
 |) '<
   +centering {
-    \generate-qrcode (`estis`);
+    \generate-qrcode ?:(160pt) (`https://twitter.com/estis_jc`);
   }
   +p{
-    ようやく動く実装が終わったので公開です．
+    QR コード\footnote{QRコードは株式会社デンソーウェーブの登録商標です} を \SATySFi; で使うためのツールを作成しました．
     使い方は 
   }
   +code(`@import: QRCodeGenerator`);
   +p{
     で読み込んでもらった後，
   }
-  +code(`QRCodeGenerator.generate-qrcode: point -> string -> graphics list`);
+  +code(`
+QRCodeGenerator.generate-qrcode: 
+  point -> length -> string -> graphics list
+  `);
   +p{
     で埋め込んでもらうか， 上のように 
   }
-  +code(``\QRCodeGenerator.generate-qrcode (`hello`)``);
+  +code(``\QRCodeGenerator.generate-qrcode ?:(160pt) (`hello`)``);
   +p{
     とすれば，インラインで使用できます．
   }
   +p{
-    現バージョンでは ascii で７文字しか出せないので使えたものではありませんが，
+    現状では最大 32 文字（Version2, ECLevelL）を埋め込めます．
     そのうちいくつかの QRコードをサポートする予定です．
   }
   
