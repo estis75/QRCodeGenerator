@@ -601,13 +601,25 @@ end = struct
           ))
         )) 
       in 
-      let calc-data qrcode2d = 
+      let calc-data qrcode2d maskpattern = 
+        let qrcode2d = set-mask tmp-qrcode maskpattern in
         let calc-data-for-modules-of-line qrcode2d = 
           qrcode2d |> List.fold-lefti (fun i lhl ln -> (
             let (_, _, tmp)  = ( ln |> List.fold-lefti (fun j (l1, l2, sum) c -> (
               match c with 
                | Some(tp) -> (
-                  if tp then (1, 0, (sum + (max 0 (l2 - 3)))) else (1, 0, (sum + (max 0 (l2 - 3))))
+                  if tp then (
+                    if l2 > 0 then 
+                      (1, 0, (sum + (if l2 >= 5 then (l2 - 2) else 0))) 
+                    else 
+                      (l1+1, 0, sum) 
+                  )
+                  else (
+                    if l1 > 0 then
+                      (0, 1, (sum + (if l1 >= 5 then (l1 - 2) else 0)))
+                    else 
+                      (0, l2+1, sum)
+                  )
                 )
                | None -> (0, 0, sum)
             )) (0,0,0)) in
@@ -693,7 +705,7 @@ end = struct
                        && (match (c, l8) with |(Some(l), Some(r)) -> ( l && r || not l && not r ) | _ -> false) 
                        && (match (c, l9) with |(Some(l), Some(r)) -> ( l && not r || not l && not r ) | _ -> false) 
                        && (match (c, l10) with |(Some(l), Some(r)) -> ( l && r || not l && not r ) | _ -> false) 
-                      then 30 else 0)
+                      then 40 else 0)
             )) 0 ) in
            tmp + lhl
           )) 0 in
@@ -755,7 +767,7 @@ end = struct
                        && (match (c, l8) with |(Some(l), Some(r)) -> ( l && r || not l && not r ) | _ -> false) 
                        && (match (c, l9) with |(Some(l), Some(r)) -> ( l && not r || not l && not r ) | _ -> false) 
                        && (match (c, l10) with |(Some(l), Some(r)) -> ( l && r || not l && not r ) | _ -> false) 
-                      then 30 else 0)
+                      then 40 else 0)
             )) 0 ) in
            tmp + lhl
           )) 0 in
@@ -767,29 +779,45 @@ end = struct
           h + v + d1 + d2
         in
         let calc-data-for-rate-of-black-module qrcode2d = 
-          let bs = (List.concat qrcode2d) |> List.filter (fun c -> (match c with | Some(true) -> true | _ -> false)) |> List.length in
-          let bssize = (bs * 100 / main-zone * main-zone) in
+          let qrcode2d-mainzone = qrcode2d 
+            |> List.mapi (fun i l -> (l |> List.mapi (fun j c -> ((i, j), c)))) 
+            |> List.concat
+            |> List.filter (fun ((i,j), c) -> (quiet-zone <= i && i < quiet-zone + main-zone && quiet-zone <= j && j < quiet-zone + main-zone))
+            |> List.map (fun (ij, c) -> c)
+          in
+          let bs = qrcode2d-mainzone |> List.filter (fun c -> (match c with | Some(true) -> true | _ -> false)) |> List.length in
+          let bssize = (bs * 100) / (qrcode2d-mainzone |> List.length) in
           ((max (bssize - 55) 0) + (max (45 - bssize) 0)) * 10
         in
-        % テストする
         let qrcode2d-tr = transpose-2d qrcode2d in
+        let modules-of-line = (calc-data-for-modules-of-line qrcode2d) in 
+        let modules-of-line-tr = (calc-data-for-modules-of-line qrcode2d-tr) in 
+        let same-colors-module-block = (calc-data-for-same-colors-module-block qrcode2d) in
+        let finder-pattern-4-11311-4 = (calc-data-for-4-11311-4 qrcode2d) in
+        let rate-of-black-module = (calc-data-for-rate-of-black-module qrcode2d) in
         let sum = 
-          (calc-data-for-modules-of-line qrcode2d) + (calc-data-for-modules-of-line qrcode2d-tr) 
-           + (calc-data-for-same-colors-module-block qrcode2d) + (calc-data-for-same-colors-module-block qrcode2d-tr) 
-           + (calc-data-for-4-11311-4 qrcode2d)
-           + (calc-data-for-rate-of-black-module qrcode2d)
+           modules-of-line + modules-of-line-tr
+           + same-colors-module-block
+           + finder-pattern-4-11311-4
+           + rate-of-black-module
         in
+        let () = display-message (#`  `# ^ (maskpattern-to-string maskpattern) ^ #` `# ^ (arabic sum)) in 
+        let () = display-message (#`    modules-of-line` ^ #` `# ^ (arabic modules-of-line)) in 
+        let () = display-message (#`    modules-of-line-tr` ^ #` `# ^ (arabic modules-of-line-tr)) in 
+        let () = display-message (#`    same-colors-module-block` ^ #` `# ^ (arabic same-colors-module-block)) in 
+        let () = display-message (#`    finder-pattern-4-11311-4` ^ #` `# ^ (arabic finder-pattern-4-11311-4)) in 
+        let () = display-message (#`    rate-of-black-module` ^ #` `# ^ (arabic rate-of-black-module)) in 
           sum
       in
       let results = [
-        (calc-data (set-mask tmp-qrcode Mask000), Mask000) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs)));
-        (calc-data (set-mask tmp-qrcode Mask001), Mask001) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
-        (calc-data (set-mask tmp-qrcode Mask010), Mask010) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs)));
-        (calc-data (set-mask tmp-qrcode Mask011), Mask011) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
-        (calc-data (set-mask tmp-qrcode Mask100), Mask100) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
-        (calc-data (set-mask tmp-qrcode Mask101), Mask101) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
-        (calc-data (set-mask tmp-qrcode Mask110), Mask110) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
-        (calc-data (set-mask tmp-qrcode Mask111), Mask111) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
+        (calc-data tmp-qrcode Mask000, Mask000);
+        (calc-data tmp-qrcode Mask001, Mask001); 
+        (calc-data tmp-qrcode Mask010, Mask010);
+        (calc-data tmp-qrcode Mask011, Mask011); 
+        (calc-data tmp-qrcode Mask100, Mask100); 
+        (calc-data tmp-qrcode Mask101, Mask101); 
+        (calc-data tmp-qrcode Mask110, Mask110); 
+        (calc-data tmp-qrcode Mask111, Mask111); 
       ] in
       let (_, result) = results |> List.fold-left (fun (lhs,lt) (rhs, rt) -> (if lhs < rhs then (lhs, lt) else (rhs, rt))) (100000000000000, MaskNotDefined) in
 
