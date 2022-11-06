@@ -95,6 +95,41 @@ end = struct
       )
     | VersionNotDefined ->  abort-with-message `Version information is not defined.`
 
+  type maskPattern =
+    | Mask000
+    | Mask001
+    | Mask010
+    | Mask011
+    | Mask100
+    | Mask101
+    | Mask110
+    | Mask111
+    | MaskNotDefined
+
+  let maskpattern-to-int maskpattern = 
+    match maskpattern with
+    | Mask000 -> 0
+    | Mask001 -> 1
+    | Mask010 -> 2
+    | Mask011 -> 3
+    | Mask100 -> 4
+    | Mask101 -> 5
+    | Mask110 -> 6
+    | Mask111 -> 7
+    | MaskNotDefined -> 8
+
+  let maskpattern-to-string maskpattern = 
+    match maskpattern with
+    | Mask000 -> `Mask000`
+    | Mask001 -> `Mask001`
+    | Mask010 -> `Mask010`
+    | Mask011 -> `Mask011`
+    | Mask100 -> `Mask100`
+    | Mask101 -> `Mask101`
+    | Mask110 -> `Mask110`
+    | Mask111 -> `Mask111`
+    | MaskNotDefined -> `MaskNotDefined`
+
   let-rec gen-list i = 
     if i > 0 then
       List.append [0] (gen-list (i - 1))
@@ -107,8 +142,36 @@ end = struct
     else 
       []
 
+  let-rec zip-qrcode1d linel liner = 
+    match (linel, liner) with
+     | (l :: ls, r :: rs) -> (l, r) :: zip-qrcode1d ls rs
+     | ([], r) -> []
+     | (l, []) -> []
+
+  let-rec zip-qrcode2d qrcodel qrcoder = 
+    match (qrcodel, qrcoder) with
+     | (l :: ls, r :: rs) -> (zip-qrcode1d l r) :: (zip-qrcode2d ls rs)
+     | ([], r) -> []
+     | (l, []) -> []
+
+  let-rec zip-qrcode1d-with-emptylist linel liner = 
+    match (linel, liner) with
+     | (l :: ls, r :: rs) -> List.append [(l, r)] (zip-qrcode1d-with-emptylist ls rs)
+     | ([], r :: rs) -> List.append [(r, [])] (zip-qrcode1d-with-emptylist [] rs)
+     | (l :: ls, []) -> List.append [(l, [])] (zip-qrcode1d-with-emptylist ls [])
+     | ([], []) -> []
+
+  let-rec transpose-2d qrcode = 
+    match qrcode with 
+     | l :: ls -> (zip-qrcode1d-with-emptylist (l |> List.map(fun c -> [c])) (transpose-2d ls)) |> List.map (fun (l,r) -> (r |> List.append l))
+     | [] -> []
+      % let _ = [[2; 3]; [4; 5]] |> List.map(fun l -> display-message (l |> List.fold-left (fun l c -> (l ^ #` `# ^ (arabic c))) #` `#)) in
+      % let _ = [[2; 3]; [4; 5]] |> transpose-2d |> List.map(fun l -> display-message (l |> List.fold-left (fun l c -> (l ^ #` `# ^ (arabic c))) #` `#)) in
+
   let is-even n = 
     round(float (n) /. 2.) * 2 == n
+
+  let max l r = if l > r then l else r
 
   let (gf2on8-num-to-pow, gf2on8-pow-to-num) =
     let ppoly = [false; false; false; false; false; false; false; false; true] in
@@ -506,7 +569,235 @@ end = struct
     in
 
 
-    let set-format-information-top-left qrcode2d = 
+    let is-needed-mask maskpattern (y, x) =
+      match maskpattern with 
+       | Mask000 -> modulo (x + y) 2 == 0
+       | Mask001 -> modulo x 2 == 0
+       | Mask010 -> modulo y 3 == 0
+       | Mask011 -> modulo (x + y) 3 == 0
+       | Mask100 -> modulo (x / 2 + y / 3) 2 == 0
+       | Mask101 -> (modulo (x * y) 2) + (modulo (x * y) 3) == 0
+       | Mask110 -> modulo ((modulo (x * y) 2) + (modulo (x * y) 3)) 2 == 0
+       | Mask111 -> modulo ((modulo (x + y) 2) + (modulo (x * y) 3)) 2 == 0
+       | MaskNotDefined -> false
+    in
+
+    let calculate-best-mask-pattern dummy-qrcode2d mask-place =
+      let () = display-message `calculating best mask pattern ...` in
+      let tmp-qrcode = zip-qrcode2d dummy-qrcode2d mask-place in
+      let set-mask qrcode2d-with-maskdata maskpattern = 
+        qrcode2d-with-maskdata |> List.mapi (fun i l -> (
+          l |> List.mapi (fun j (mc, with-mask) -> (
+            if with-mask && quiet-zone <= i && i < quiet-zone + main-zone && quiet-zone <= j && j < quiet-zone + main-zone then (
+              match mc with 
+               | Some(c) -> ( 
+                if is-needed-mask maskpattern (i - quiet-zone , j - quiet-zone) then
+                  Some(not c)
+                else
+                  Some(c)
+                )
+               | None -> None
+            ) else mc
+          ))
+        )) 
+      in 
+      let calc-data qrcode2d = 
+        let calc-data-for-modules-of-line qrcode2d = 
+          qrcode2d |> List.fold-lefti (fun i lhl ln -> (
+            let (_, _, tmp)  = ( ln |> List.fold-lefti (fun j (l1, l2, sum) c -> (
+              match c with 
+               | Some(tp) -> (
+                  if tp then (1, 0, (sum + (max 0 (l2 - 3)))) else (1, 0, (sum + (max 0 (l2 - 3))))
+                )
+               | None -> (0, 0, sum)
+            )) (0,0,0)) in
+           tmp + lhl
+          )) 0 in
+        let calc-data-for-same-colors-module-block qrcode2d = 
+          qrcode2d |> List.fold-lefti (fun i lhl l -> (
+            let tmp = ( l |> List.fold-lefti (fun j lhs c -> (
+              let lu = match Option.bind (qrcode2d |> List.nth (i + 1)) (fun l -> (l |> List.nth j)) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let rd = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth (j+1))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let ru = match Option.bind (qrcode2d |> List.nth (i+1)) (fun l -> (l |> List.nth (j+1))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              lhs + (if (match (c, rd) with |(Some(l), Some(r)) -> not ( l && not r || not l && r ) | _ -> false) 
+                       && (match (c, ru) with |(Some(l), Some(r)) -> not ( l && not r || not l && r ) | _ -> false) 
+                       && (match (c, lu) with |(Some(l), Some(r)) -> not ( l && not r || not l && r ) | _ -> false) 
+                      then 3 else 0)
+            )) 0 ) in
+           tmp + lhl
+          )) 0 in
+        let calc-data-for-4-11311-4-horizontal qrcode2d = 
+          qrcode2d |> List.fold-lefti (fun i lhl l -> (
+            let tmp = ( l |> List.fold-lefti (fun j lhs c -> (
+              let l0 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth j)) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l1 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth (j+1))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l2 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth (j+2))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l3 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth (j+3))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l4 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth (j+4))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l5 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth (j+5))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l6 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth (j+6))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l7 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth (j+7))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l8 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth (j+7))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l9 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth (j+7))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l10 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth (j+7))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              lhs + (if (match (c, l0) with |(Some(l), Some(r)) -> ( l && not r || not l && r ) | _ -> false) 
+                       && (match (c, l1) with |(Some(l), Some(r)) -> ( l && not r || not l && not r ) | _ -> false) 
+                       && (match (c, l2) with |(Some(l), Some(r)) -> ( l && not r || not l && r ) | _ -> false)  
+                       && (match (c, l3) with |(Some(l), Some(r)) -> ( l && not r || not l && r ) | _ -> false) 
+                       && (match (c, l4) with |(Some(l), Some(r)) -> ( l && r || not l && r ) | _ -> false) 
+                       && (match (c, l5) with |(Some(l), Some(r)) -> ( l && not r || not l && not r ) | _ -> false) 
+                       && (match (c, l6) with |(Some(l), Some(r)) -> ( l && r || not l && r ) | _ -> false) 
+                       && (match (c, l7) with |(Some(l), Some(r)) -> ( l && r || not l && not r ) | _ -> false) 
+                       && (match (c, l8) with |(Some(l), Some(r)) -> ( l && r || not l && not r ) | _ -> false) 
+                       && (match (c, l9) with |(Some(l), Some(r)) -> ( l && not r || not l && not r ) | _ -> false) 
+                       && (match (c, l10) with |(Some(l), Some(r)) -> ( l && r || not l && not r ) | _ -> false) 
+                      then 30 else 0)
+            )) 0 ) in
+           tmp + lhl
+          )) 0 in
+        let calc-data-for-4-11311-4-diagonal qrcode2d = 
+          qrcode2d |> List.fold-lefti (fun i lhl l -> (
+            let tmp = ( l |> List.fold-lefti (fun j lhs c -> (
+              let l0 = match Option.bind (qrcode2d |> List.nth i) (fun l -> (l |> List.nth j)) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l1 = match Option.bind (qrcode2d |> List.nth (i+1)) (fun l -> (l |> List.nth (j+1))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l2 = match Option.bind (qrcode2d |> List.nth (i+2)) (fun l -> (l |> List.nth (j+2))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l3 = match Option.bind (qrcode2d |> List.nth (i+3)) (fun l -> (l |> List.nth (j+3))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l4 = match Option.bind (qrcode2d |> List.nth (i+4)) (fun l -> (l |> List.nth (j+4))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l5 = match Option.bind (qrcode2d |> List.nth (i+5)) (fun l -> (l |> List.nth (j+5))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l6 = match Option.bind (qrcode2d |> List.nth (i+6)) (fun l -> (l |> List.nth (j+6))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l7 = match Option.bind (qrcode2d |> List.nth (i+7)) (fun l -> (l |> List.nth (j+7))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l8 = match Option.bind (qrcode2d |> List.nth (i+8)) (fun l -> (l |> List.nth (j+7))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l9 = match Option.bind (qrcode2d |> List.nth (i+9)) (fun l -> (l |> List.nth (j+7))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              let l10 = match Option.bind (qrcode2d |> List.nth (i+10)) (fun l -> (l |> List.nth (j+7))) with
+                | Some(Some(d)) -> Some(d)
+                | _ -> None
+              in
+              lhs + (if (match (c, l0) with |(Some(l), Some(r)) -> ( l && not r || not l && r ) | _ -> false) 
+                       && (match (c, l1) with |(Some(l), Some(r)) -> ( l && not r || not l && not r ) | _ -> false) 
+                       && (match (c, l2) with |(Some(l), Some(r)) -> ( l && not r || not l && r ) | _ -> false)  
+                       && (match (c, l3) with |(Some(l), Some(r)) -> ( l && not r || not l && r ) | _ -> false) 
+                       && (match (c, l4) with |(Some(l), Some(r)) -> ( l && r || not l && r ) | _ -> false) 
+                       && (match (c, l5) with |(Some(l), Some(r)) -> ( l && not r || not l && not r ) | _ -> false) 
+                       && (match (c, l6) with |(Some(l), Some(r)) -> ( l && r || not l && r ) | _ -> false) 
+                       && (match (c, l7) with |(Some(l), Some(r)) -> ( l && r || not l && not r ) | _ -> false) 
+                       && (match (c, l8) with |(Some(l), Some(r)) -> ( l && r || not l && not r ) | _ -> false) 
+                       && (match (c, l9) with |(Some(l), Some(r)) -> ( l && not r || not l && not r ) | _ -> false) 
+                       && (match (c, l10) with |(Some(l), Some(r)) -> ( l && r || not l && not r ) | _ -> false) 
+                      then 30 else 0)
+            )) 0 ) in
+           tmp + lhl
+          )) 0 in
+        let calc-data-for-4-11311-4 qrcode2d = 
+          let h = calc-data-for-4-11311-4-horizontal qrcode2d in
+          let v = calc-data-for-4-11311-4-horizontal (transpose-2d qrcode2d) in
+          let d1 = calc-data-for-4-11311-4-diagonal qrcode2d in
+          let d2 = calc-data-for-4-11311-4-diagonal (List.reverse qrcode2d) in
+          h + v + d1 + d2
+        in
+        let calc-data-for-rate-of-black-module qrcode2d = 
+          let bs = (List.concat qrcode2d) |> List.filter (fun c -> (match c with | Some(true) -> true | _ -> false)) |> List.length in
+          let bssize = (bs * 100 / main-zone * main-zone) in
+          ((max (bssize - 55) 0) + (max (45 - bssize) 0)) * 10
+        in
+        % テストする
+        let qrcode2d-tr = transpose-2d qrcode2d in
+        let sum = 
+          (calc-data-for-modules-of-line qrcode2d) + (calc-data-for-modules-of-line qrcode2d-tr) 
+           + (calc-data-for-same-colors-module-block qrcode2d) + (calc-data-for-same-colors-module-block qrcode2d-tr) 
+           + (calc-data-for-4-11311-4 qrcode2d)
+           + (calc-data-for-rate-of-black-module qrcode2d)
+        in
+          sum
+      in
+      let results = [
+        (calc-data (set-mask tmp-qrcode Mask000), Mask000) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs)));
+        (calc-data (set-mask tmp-qrcode Mask001), Mask001) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
+        (calc-data (set-mask tmp-qrcode Mask010), Mask010) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs)));
+        (calc-data (set-mask tmp-qrcode Mask011), Mask011) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
+        (calc-data (set-mask tmp-qrcode Mask100), Mask100) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
+        (calc-data (set-mask tmp-qrcode Mask101), Mask101) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
+        (calc-data (set-mask tmp-qrcode Mask110), Mask110) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
+        (calc-data (set-mask tmp-qrcode Mask111), Mask111) |> (fun (lhs, rhs) -> (let () = display-message (#`  `# ^ (maskpattern-to-string rhs) ^ #` `# ^ (arabic lhs)) in (lhs, rhs))); 
+      ] in
+      let (_, result) = results |> List.fold-left (fun (lhs,lt) (rhs, rt) -> (if lhs < rhs then (lhs, lt) else (rhs, rt))) (100000000000000, MaskNotDefined) in
+
+      result
+    in
+
+
+    let set-format-information-top-left mask-pattern qrcode2d = 
       % FIXME: maybe somebug exists in calculating format-information
       let format-information = format-information-to-list error-collection-rate mask-pattern |> bch-15-5-encoding in
       let format-information = format-information |> List.reverse in
@@ -542,7 +833,7 @@ end = struct
       qrcode2d 
     in
 
-    let set-format-information-fragmented qrcode2d = 
+    let set-format-information-fragmented mask-pattern qrcode2d = 
       % FIXME: maybe somebug exists in calculating format-information
       let format-information = format-information-to-list error-collection-rate mask-pattern |> bch-15-5-encoding in
       let format-information = format-information |> List.reverse in
@@ -578,21 +869,86 @@ end = struct
       qrcode2d 
     in
 
-    let set-format-information qrcode2d = 
-      let qrcode2d = set-format-information-top-left qrcode2d in
-      let qrcode2d = set-format-information-fragmented qrcode2d in
+    let set-format-information mask-pattern qrcode2d = 
+      let qrcode2d = set-format-information-top-left mask-pattern qrcode2d in
+      let qrcode2d = set-format-information-fragmented mask-pattern qrcode2d in
       qrcode2d
     in 
 
-    let is-needed-mask (x, y) =
-      if mask-pattern == 3 then (
-        modulo (x + y) 3 == 0
-      ) else (
-        abort-with-message (`this version does not support the mask pattern: `# ^ arabic mask-pattern)
-      )
+    let set-dummy-format-information-top-left qrcode2d = 
+      let format-information = gen-bool-list 15 in
+      let-mutable count <- 0 in
+      let qrcode2d = qrcode2d |> List.mapi (fun i l -> (
+        if i == quiet-zone + finder-pattern-size + 1 then
+          l |> List.mapi (fun j c -> (
+            if quiet-zone <= j && Option.is-none c && !count < 7 then 
+              match format-information |> List.nth !count with
+              | Some(c) -> (
+                  let () = count <- !count + 1 in
+                  Some(c)
+                )
+              | None -> abort-with-message `something wrong`
+            else c
+          ))
+        else l
+      )) in
+      let qrcode2d = qrcode2d |> List.mapi (fun i l -> (
+        l |> List.mapi (fun j c -> (
+          if j == quiet-zone + finder-pattern-size + 1 then
+            if quiet-zone <= i && Option.is-none c && !count >= 0 then 
+              match format-information |> List.nth (7 + !count) with
+              | Some(c) -> (
+                  let () = count <- !count - 1 in
+                  Some(c)
+                )
+              | None -> abort-with-message `something wrong`
+            else c
+          else c
+        ))
+      )) in
+      qrcode2d 
     in
 
-    let set-data with-mask flatten-data qrcode2d = % int list -> bool option list
+    let set-dummy-format-information-fragmented qrcode2d = 
+      let format-information = gen-bool-list 15 in
+      let-mutable count <- 0 in
+      let qrcode2d = qrcode2d |> List.mapi (fun i l -> (
+        if i == quiet-zone + finder-pattern-size + 1 then
+          l |> List.mapi (fun j c -> (
+            if num-lines - quiet-zone - finder-pattern-size <= j && Option.is-none c && !count < 7 then 
+              match format-information |> List.nth (8 + !count) with
+              | Some(c) -> (
+                  let () = count <- !count + 1 in
+                  Some(c)
+                )
+              | None -> abort-with-message `something wrong`
+            else c
+          ))
+        else l
+      )) in
+      let qrcode2d = qrcode2d |> List.mapi (fun i l -> (
+        l |> List.mapi (fun j c -> (
+          if j == quiet-zone + finder-pattern-size + 1 then
+            if num-lines - quiet-zone - finder-pattern-size - 1 <= i && Option.is-none c && !count >= 0 then 
+              match format-information |> List.nth !count with
+              | Some(c) -> (
+                  let () = count <- !count - 1 in
+                  Some(c)
+                )
+              | None -> abort-with-message `something wrong`
+            else c
+          else c
+        ))
+      )) in
+      qrcode2d 
+    in
+    let set-dummy-format-information qrcode2d = 
+      let qrcode2d = set-dummy-format-information-top-left qrcode2d in
+      let qrcode2d = set-dummy-format-information-fragmented qrcode2d in
+      qrcode2d
+    in 
+
+    let set-data with-mask mask-pattern flatten-data qrcode2d = % int list -> bool option list
       let-mutable is-right <- true in
       let-mutable is-to-top <- true in
       let-mutable current-index <- (num-lines - quiet-zone - 1, num-lines - quiet-zone - 1) in
@@ -631,12 +987,12 @@ end = struct
           !current-index
         ) 
         in 
-        let () = display-message (#` x = `# ^ arabic x ^ #` : `#  ^ `y = `# ^ arabic y) in
+        % let () = display-message (#` x = `# ^ arabic x ^ #` : `#  ^ `y = `# ^ arabic y) in
         let () = qrcode2d <- !qrcode2d |> List.mapi (fun i l -> (
           l |> List.mapi (fun j mc -> (
             if i == x && j == y then (
               if Option.is-none mc then (
-                if with-mask && is-needed-mask (x - quiet-zone , y - quiet-zone) then
+                if with-mask && is-needed-mask mask-pattern (x - quiet-zone , y - quiet-zone) then
                   Some(not c)
                 else
                   Some(c)
@@ -673,7 +1029,7 @@ end = struct
                     | None    -> abort-with-message (`invalid line number x = `# ^ (arabic x) )
                   in
                   let-rec find-num tpy = 
-                    let () = display-message (`current index y = `# ^ arabic tpy) in
+                    % let () = display-message (`current index y = `# ^ arabic tpy) in
                     if tpy < 0 || tpy >= quiet-zone + main-zone then
                       None
                     else (
@@ -718,8 +1074,7 @@ end = struct
             (i, j, qrcode1d)
           ) 
         ) 
-      )
-       in
+      ) in
       qrlist1d |> List.map (
         fun (i, j, q) -> (
           let xmin = x +' size *' ((float i) /. (float num-lines)) in
@@ -952,8 +1307,20 @@ end = struct
     let () = qrcode <- set-finder-patterns !qrcode in
     let () = qrcode <- set-timing-patterns !qrcode in
     let () = qrcode <- set-alignment-patterns !qrcode in
-    let () = qrcode <- set-format-information !qrcode in
-    let () = qrcode <- set-data true (url-to-encoded-data url) !qrcode in % [0, 1] list
+    let qrcode-dummy = set-dummy-format-information !qrcode in
+    let mask-place = qrcode-dummy |> List.map (fun l -> (l |> List.map (fun e -> (match e with | Some(c) -> false | None -> true)))) in
+    % dummy <- set-data without mask
+    let qrcode-dummy = set-data false MaskNotDefined (url-to-encoded-data url) qrcode-dummy in % [0, 1] list
+    % mask-pattern <- calculate the best mask pattern
+    let mask-pattern = calculate-best-mask-pattern qrcode-dummy mask-place in
+    % let mask-pattern = Mask001 in
+    let () = display-message (`selected mask: `# ^ (maskpattern-to-string mask-pattern)) in
+    
+    let () = qrcode <- set-format-information (maskpattern-to-int mask-pattern) !qrcode in 
+    % qrcode <- set-data with mask
+    % let () = qrcode <- set-format-information !qrcode in
+    let () = qrcode <- set-data true mask-pattern (url-to-encoded-data url) !qrcode in % [0, 1] list
+    % let () = qrcode <- qrcode-dummy in
     % let-rec url2stringlist-fordebug lst =
     %   match lst with 
     %   | c :: next -> (arabic c) ^ #` `# ^ url2stringlist-fordebug next
